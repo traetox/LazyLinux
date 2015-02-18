@@ -11,13 +11,14 @@
 
 #define DEFAULT_IDLE_SLEEP 60*30 //30 minutes
 #define DEFAULT_DISPLAY ":0"
-#define PORT 22
+#define DEFAULT_PORT 22
 #define HELP "-h"
 #define LOGGING "-l"
 #define FORGROUND "-f"
 #define IDLE_TIME "-t"
 #define IGNORE_SSH "-i"
 #define SLEEP_NOW "-n"
+#define PORT "-p"
 #define MUTEX_PATH "/tmp/.LazyLinux"
 
 void usage(char* proggy);
@@ -35,6 +36,7 @@ FILE* logger = NULL;
 int forground = 0;
 int ignoreSsh = 0;
 int sleepOverride = 0;
+unsigned short port = DEFAULT_PORT;
 unsigned int idleToSleep = DEFAULT_IDLE_SLEEP;
 char* display = DEFAULT_DISPLAY;
 
@@ -62,6 +64,22 @@ int main(int argc, char* argv[]) {
 			i++;
 		} else if(strcmp(FORGROUND, argv[i]) == 0) {
 			forground = 1;
+		} else if(strcmp(PORT, argv[i]) == 0) {
+			unsigned long tempPort;
+			if((i+1) >= argc) {
+				fprintf(stderr, "Port specification requireds a port\n");
+				return -1;
+			}
+			tempPort = strtol(argv[i+1], &ptr, 10);
+			if(ptr[0] != '\0') {
+				fprintf(stderr, "Invalid port %s\n", argv[i+1]);
+				return -1;
+			}
+			if(tempPort <= 0 || tempPort > 0xffff) {
+				fprintf(stderr, "Invalid port %ld\n", tempPort);
+				return -1;
+			}
+			port = (unsigned short)tempPort;
 		} else if(strcmp(IGNORE_SSH, argv[i]) == 0) {
 			ignoreSsh = 1;
 		} else if(strcmp(IDLE_TIME, argv[i]) == 0) {
@@ -138,7 +156,7 @@ int mainRoutine() {
 			sleep(120);
 			continue;
 		}
-		if(activeSSHSessions(&sshConns, PORT)) {
+		if(activeSSHSessions(&sshConns, port)) {
 			LOG("Failed to get ssh connections\n");
 			return -1;
 		}
