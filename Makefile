@@ -3,9 +3,9 @@ CFLAGS=-Os -g
 LDFLAGS=-lX11 -lXss -lXext
 
 OUTPUT=LazyLinux
-OBJ=main.o ssh.o
-SRC=main.c ssh.c
-HDR=ssh.h
+OBJ=main.o ssh.o xstuff.o
+SRC=main.c ssh.c xstuff.c
+HDR=ssh.h xstuff.h log.h
 INSTALL_DIR=/usr/bin/
 
 $(OUTPUT): $(OBJ)
@@ -22,3 +22,6 @@ clean:
 
 install: $(OUTPUT) $(CONFIG)
 	cp -f $(OUTPUT) $(INSTALL_DIR)
+	chown root:root $(INSTALL_DIR)$(OUTPUT)
+	chmod 0555 $(INSTALL_DIR)$(OUTPUT)
+	chmod +s $(INSTALL_DIR)$(OUTPUT)

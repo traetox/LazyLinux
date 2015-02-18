@@ -1,47 +1,65 @@
-#include <X11/Xlib.h>
-#include <X11/extensions/dpms.h>
-#include <X11/extensions/scrnsaver.h>
 #include <stdio.h>
 #include <time.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
+#include <signal.h>
+#include <errno.h>
 #include "log.h"
+#include "ssh.h"
+#include "xstuff.h"
 
 #define DEFAULT_IDLE_SLEEP 60*30 //30 minutes
 #define DEFAULT_DISPLAY ":0"
 #define PORT 22
 #define HELP "-h"
-#define VERBOSE "-v"
+#define LOGGING "-l"
 #define FORGROUND "-f"
 #define IDLE_TIME "-t"
 #define IGNORE_SSH "-i"
-
+#define SLEEP_NOW "-n"
+#define MUTEX_PATH "/tmp/.LazyLinux"
 
 void usage(char* proggy);
-int getIdleTime(Display* dpy, unsigned long* idleTime);
-unsigned long workaroundCreepyXServer(Display *dpy, unsigned long _idleTime );
-int background();
+pid_t background();
+pid_t getMutex();
+pid_t serverRunning();
+int dropMutex(pid_t pid);
+int signalParent(pid_t pid);
 int goToSleep();
-int mainRoutine(Display* dpy);
+int mainRoutine();
+int becomeRoot();
+void sigHandler(int signum);
 
-int verbose = 0;
+FILE* logger = NULL;
 int forground = 0;
 int ignoreSsh = 0;
+int sleepOverride = 0;
 unsigned int idleToSleep = DEFAULT_IDLE_SLEEP;
 char* display = DEFAULT_DISPLAY;
 
 int main(int argc, char* argv[]) {
-	Display *dpy;
 	int i;
 	unsigned long tempIdle;
 	char* ptr;
+	int sleepNow = 0;
+	pid_t serverPid = 0;
 
 	for(i = 1; i < argc; i++) {
 		if(strcmp(HELP, argv[i]) == 0) {
 			usage(argv[0]);
 			return 0;
-		} else if(strcmp(VERBOSE, argv[i]) == 0) {
-			verbose = 1;
+		} else if(strcmp(LOGGING, argv[i]) == 0) {
+			if((i+1) >= argc) {
+				fprintf(stderr, "Logging requires a file\n");
+				return -1;
+			}
+			logger = fopen(argv[i+1], "a+");
+			if(logger == NULL) {
+				fprintf(stderr, "Failed to open logging file\n");
+				return -1;
+			}
+			i++;
 		} else if(strcmp(FORGROUND, argv[i]) == 0) {
 			forground = 1;
 		} else if(strcmp(IGNORE_SSH, argv[i]) == 0) {
@@ -60,48 +78,76 @@ int main(int argc, char* argv[]) {
 			}
 			idleToSleep = tempIdle;
 			i++;
+		} else if(strcmp(SLEEP_NOW, argv[i]) == 0) {
+			sleepNow = 1;
 		} else {
 			display = argv[i];
 		}
 	}
-	
-	dpy = XOpenDisplay(display);
-	if(dpy == NULL) {
-		LOG("Failed to open %s\n", display);
+	//try to become root
+	if(becomeRoot()) {
+		fprintf(stderr, "Failed to become root\n");
 		return -1;
 	}
-	return mainRoutine(dpy);
+
+	//check if server is running now
+	serverPid = serverRunning();
+	if(serverPid) {
+		//if we are asking to just sleep now that is fine
+		if(sleepNow) {
+			//signal the parent
+			return signalParent(serverPid);
+		}
+		//not asking to sleep immediately and server is running
+		//refuse to do anything
+		fprintf(stderr, "Server is currently running\n");
+		return -1;
+	} else {
+		if(sleepNow) {
+			fprintf(stderr, "Daemon is not running, sleep now not allowed\n");
+			return -1;
+		}
+	}
+	
+	return mainRoutine();
 }
 
-int mainRoutine(Display* dpy) {
+int mainRoutine() {
 	unsigned long idleTime = 0;
 	unsigned int sshConns = 0;
 
-	//try to become root
-	if(setuid(0) != 0) {
-		LOG("Failed to become root!\n");
-		return -1;
-	}
-
 	if(forground == 0) {
-		if(background()) {
+		pid_t pid = background();
+		if(pid) {
 			//we are the parent, bail
 			return 0;
 		}
 	}
+
+	signal(SIGUSR1, sigHandler);
+	if(dropMutex(getpid())) {
+		fprintf(stderr, "Failed to drop mutex\n");
+		return -1;
+	}
+
 	while(1) {
 		idleTime = 0;
 		sshConns = 0;
-		if(getIdleTime(dpy, &idleTime)) {
+		if(getIdleTime(&idleTime)) {
 			LOG("Failed to get idleTime\n");
-			return -1;
+			sleep(120);
+			continue;
 		}
 		if(activeSSHSessions(&sshConns, PORT)) {
 			LOG("Failed to get ssh connections\n");
 			return -1;
 		}
-		if((idleTime/1000) > idleToSleep) {
-			if(sshConns == 0 || ignoreSsh != 0) {
+		if((idleTime/1000) > idleToSleep || sleepOverride == 1) {
+			if(sshConns == 0 || ignoreSsh != 0 || sleepOverride == 1) {
+				if(sleepOverride == 1) {
+					LOG("Sleeping due to external sleep request\n");
+				}
+				sleepOverride = 0;
 				goToSleep();
 				continue;
 			}
@@ -113,111 +159,27 @@ int mainRoutine(Display* dpy) {
 }
 
 
-int getIdleTime(Display* dpy, unsigned long* idleTime) {
-	int event, error;
-	XScreenSaverInfo* ssi;
-
-	if(idleTime == NULL) {
-		LOG("paramter NULL\n");
-		return -1;
-	}
-
-	if(!XScreenSaverQueryExtension(dpy, &event, &error)) {
-		LOG("Could not query screensaver\n");
-		return -1;
-	}
-	ssi = XScreenSaverAllocInfo();
-	if(ssi == NULL) {
-		LOG("Failed to allocate screensaver info\n");
-		return -1;
-	}
-	if(!XScreenSaverQueryInfo(dpy, DefaultRootWindow(dpy), ssi)) {
-		XFree(ssi);
-		LOG("Screensaver extension not supported\n");
-		return -1;
-	}
-
-	*idleTime = workaroundCreepyXServer(dpy, ssi->idle);
-
-	XFree(ssi);
-	return 0;
-}
-
 void usage(char* proggy) {
 	fprintf(stdout, "%s -h\tShow usage\n", proggy);
-	fprintf(stdout, "%s -v\tBe verbose\n", proggy);
+	fprintf(stdout, "%s -v <log file>\tLog to a file\n", proggy);
+	fprintf(stdout, "%s -n\t Ask to sleep right now\n", proggy);
 	fprintf(stdout, "%s -f\tDo not background the process\n", proggy);
 	fprintf(stdout, "%s -t <idle seconds>\tSeconds of idle before sleep\n", proggy);
 	fprintf(stdout, "%s <display>\n", proggy);
 }
 
 
-/*!
- * This function works around an XServer idleTime bug in the
- * XScreenSaverExtension if dpms is running. In this case the current
- * dpms-state time is always subtracted from the current idletime.
- * This means: XScreenSaverInfo->idle is not the time since the last
- * user activity, as descriped in the header file of the extension.
- * This result in SUSE bug # and sf.net bug #. The bug in the XServer itself
- * is reported at https://bugs.freedesktop.org/buglist.cgi?quicksearch=6439.
- *
- * Workaround: Check if if XServer is in a dpms state, check the 
- *             current timeout for this state and add this value to 
- *             the current idle time and return.
- *
- * \param _idleTime a unsigned long value with the current idletime from
- *                  XScreenSaverInfo->idle
- * \return a unsigned long with the corrected idletime
- */
-unsigned long workaroundCreepyXServer(Display *dpy, unsigned long _idleTime ){
-  int dummy;
-  CARD16 standby, suspend, off;
-  CARD16 state;
-  BOOL onoff;
-
-  if (DPMSQueryExtension(dpy, &dummy, &dummy)) {
-    if (DPMSCapable(dpy)) {
-      DPMSGetTimeouts(dpy, &standby, &suspend, &off);
-      DPMSInfo(dpy, &state, &onoff);
-
-      if (onoff) {
-        switch (state) {
-          case DPMSModeStandby:
-            /* this check is a littlebit paranoid, but be sure */
-            if (_idleTime < (unsigned) (standby * 1000))
-              _idleTime += (standby * 1000);
-            break;
-          case DPMSModeSuspend:
-            if (_idleTime < (unsigned) ((suspend + standby) * 1000))
-              _idleTime += ((suspend + standby) * 1000);
-            break;
-          case DPMSModeOff:
-            if (_idleTime < (unsigned) ((off + suspend + standby) * 1000))
-              _idleTime += ((off + suspend + standby) * 1000);
-            break;
-          case DPMSModeOn:
-          default:
-            break;
-        }
-      }
-    } 
-  }
-
-  return _idleTime;
-}
-
-int background() {
-	if(fork() == 0) {
+pid_t background() {
+	pid_t pid = fork();
+	if(pid == 0) {
 		//we are the child
 		fclose(stdin);
 		fclose(stdout);
-		if(verbose == 0) {
-			fclose(stderr);
-		}
+		fclose(stderr);
 		return 0;
 	}
 	//we are the parent
-	return 1;
+	return pid;
 }
 
 char* timestamp() {
@@ -257,4 +219,79 @@ int goToSleep() {
 
 	LOG("%s Woke up from sleep\n", timestamp());
 	return 0;
+}
+
+pid_t getMutex() {
+	long int tpid = 0;
+	char line[64];
+	char *ptr = line;
+	FILE* fin;
+	fin = fopen(MUTEX_PATH, "r");
+	if(fin == NULL) {
+		return 0;
+	}
+	memset(line, 0, sizeof(line));
+	if(fread(line, 1, sizeof(line), fin) <= 0) {
+		fclose(fin);
+		return 0;
+	}
+	fclose(fin);
+
+	tpid = strtol(line, &ptr, 10);
+	if(tpid <= 0) {
+		return 0;
+	}
+	if(ptr[0] != '\0') {
+		//file was corrupted
+		return 0;
+	}
+	return (pid_t)tpid;
+}
+
+pid_t serverRunning() {
+	char procPath[256];
+	struct stat st;
+	pid_t serverPid = getMutex();
+	if(serverPid == 0) {
+		return 0;
+	}
+	//check if the process is still running
+	snprintf(procPath, sizeof(procPath), "/proc/%d", serverPid);
+	if(stat(procPath, &st)) {
+		return 0;
+	}
+	return serverPid;
+}
+
+int dropMutex(pid_t pid) {
+	FILE* fout = fopen(MUTEX_PATH, "w+");
+	if(fout == NULL) {
+		return -1;
+	}
+	fprintf(fout, "%ld", (long int)pid);
+	fclose(fout);
+	return 0;
+}
+
+int signalParent(pid_t pid) {
+	return kill(pid, SIGUSR1);
+}
+
+
+int becomeRoot() {
+	if(getuid() != 0) {
+		//attempt to setuid to 0
+		int ret = setuid(0);
+		if(ret != 0) {
+			LOG("setuid failed(%d) with error %d\n", ret, errno);
+		}
+	}
+	return 0;
+}
+
+void sigHandler(int signum) {
+	if(signum == SIGUSR1) {
+		LOG("Sleep now request made\n");
+		sleepOverride = 1;
+	}
 }
