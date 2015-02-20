@@ -183,6 +183,7 @@ void usage(char* proggy) {
 	fprintf(stdout, "%s -n\t Ask to sleep right now\n", proggy);
 	fprintf(stdout, "%s -f\tDo not background the process\n", proggy);
 	fprintf(stdout, "%s -t <idle seconds>\tSeconds of idle before sleep\n", proggy);
+	fprintf(stdout, "%s -p <ssh port>\tPort to look for SSH connections on\n", proggy);
 	fprintf(stdout, "%s <display>\n", proggy);
 }
 
