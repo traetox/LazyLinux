@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include "ssh.h"
+#include "log.h"
 
 #define PROC_NET_STAT "/proc/net/tcp"
 
@@ -45,14 +46,14 @@ int parseLine(char* line, unsigned short *dstPort, unsigned long *srcAddy) {
 		i++;
 	}
 	if(x != 2) {
-		fprintf(stderr, "Never found 3rd colon\n");
+		LOG("Never found 3rd colon\n");
 		return -1;
 	}
 	i++;//skip the colon
 	//try to grab the port
 	temp = strtol(&line[++i], &ptr, 16);
 	if(ptr == &line[i]) {
-		fprintf(stderr, "couldn't get string out of %s\n", &line[i]);
+		LOG("couldn't get string out of %s\n", &line[i]);
 		return -1;
 	}
 	*dstPort = (unsigned short)temp;
@@ -61,7 +62,7 @@ int parseLine(char* line, unsigned short *dstPort, unsigned long *srcAddy) {
 	line = &ptr[1];
 	temp = strtol(line, &ptr, 16);
 	if(ptr == &line[i]) {
-		fprintf(stderr, "couldn't get string out of %s\n", &line[i]);
+		LOG("couldn't get string out of %s\n", &line[i]);
 		return -1;
 	}
 	*srcAddy = (unsigned long)temp;
@@ -75,12 +76,12 @@ int activeSSHSessions(unsigned int* count, unsigned short sshPort) {
 	unsigned long src;
 	unsigned short port;
 	if(count == NULL) {
-		fprintf(stderr, "parameter is NULL\n");
+		LOG("parameter is NULL\n");
 		return -1;
 	}
 	fin = fopen(PROC_NET_STAT, "r");
 	if(fin == NULL) {
-		fprintf(stderr, "Failed to open proc file\n");
+		LOG("Failed to open proc file\n");
 		return -1;
 	}
 	//read the title line

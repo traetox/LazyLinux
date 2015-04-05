@@ -18,8 +18,13 @@
 #define IDLE_TIME "-t"
 #define IGNORE_SSH "-i"
 #define SLEEP_NOW "-n"
+#define DELAY_SLEEP "-d"
 #define PORT "-p"
 #define MUTEX_PATH "/tmp/.LazyLinux"
+#define SIG_SLEEP_INTERVAL 20000 //20ms
+#define SLEEP_INTERVAL 10
+#define SLEEP_DELAY_INTERVAL 600 //10 minutes
+#define MAX_DELAY_TIME 60*24*365 //delays longer than one year are not allowed
 
 void usage(char* proggy);
 pid_t background();
@@ -30,6 +35,7 @@ int signalParent(pid_t pid);
 int goToSleep();
 int mainRoutine();
 int becomeRoot();
+int delaySleep(int minutes, pid_t pid);
 void sigHandler(int signum);
 
 FILE* logger = NULL;
@@ -39,12 +45,15 @@ int sleepOverride = 0;
 unsigned short port = DEFAULT_PORT;
 unsigned int idleToSleep = DEFAULT_IDLE_SLEEP;
 char* display = DEFAULT_DISPLAY;
+unsigned int sleepDelay = 0;
 
 int main(int argc, char* argv[]) {
 	int i;
 	unsigned long tempIdle;
+	unsigned long tempDelay;
 	char* ptr;
 	int sleepNow = 0;
+	int sleepDelay = 0;
 	pid_t serverPid = 0;
 
 	for(i = 1; i < argc; i++) {
@@ -56,11 +65,13 @@ int main(int argc, char* argv[]) {
 				fprintf(stderr, "Logging requires a file\n");
 				return -1;
 			}
-			logger = fopen(argv[i+1], "a+");
+			logger = fopen(argv[i+1], "a");
 			if(logger == NULL) {
 				fprintf(stderr, "Failed to open logging file\n");
 				return -1;
 			}
+			fprintf(logger, "Process started\n");
+			fprintf(stderr, "Logging to %s\n", argv[i+1]);
 			i++;
 		} else if(strcmp(FORGROUND, argv[i]) == 0) {
 			forground = 1;
@@ -84,8 +95,7 @@ int main(int argc, char* argv[]) {
 			ignoreSsh = 1;
 		} else if(strcmp(IDLE_TIME, argv[i]) == 0) {
 			if((i+1) >= argc) {
-				fprintf(stderr, "Invalid idle time override \"%s\"\n", argv[i+1]);
-				fprintf(stderr, "\"%s\"\n", ptr);
+				fprintf(stderr, "Invalid idle time override\n");
 				return -1;
 			}
 			tempIdle = strtol(argv[i+1], &ptr, 10);
@@ -98,6 +108,23 @@ int main(int argc, char* argv[]) {
 			i++;
 		} else if(strcmp(SLEEP_NOW, argv[i]) == 0) {
 			sleepNow = 1;
+		} else if(strcmp(DELAY_SLEEP, argv[i]) == 0) {
+			if((i+1) >= argc) {
+				fprintf(stderr, "Invalid delay time override\n");
+				return -1;
+			}
+			tempDelay = strtol(argv[i+1], &ptr, 10);
+			if(ptr[0] != '\0') {
+				fprintf(stderr, "Invalid delay time override \"%s\"\n", argv[i+1]);
+				fprintf(stderr, "\"%s\"\n", ptr);
+				return -1;
+			}
+			if(tempDelay > MAX_DELAY_TIME) {
+				fprintf(stderr, "Invalid delay time.  Max is %d\n", MAX_DELAY_TIME);
+				return -1;
+			}
+			sleepDelay = tempDelay;
+			i++;	
 		} else {
 			display = argv[i];
 		}
@@ -115,6 +142,8 @@ int main(int argc, char* argv[]) {
 		if(sleepNow) {
 			//signal the parent
 			return signalParent(serverPid);
+		} else if(sleepDelay > 0) {
+			return delaySleep(sleepDelay, serverPid);
 		}
 		//not asking to sleep immediately and server is running
 		//refuse to do anything
@@ -143,10 +172,12 @@ int mainRoutine() {
 	}
 
 	signal(SIGUSR1, sigHandler);
+	signal(SIGUSR2, sigHandler);
 	if(dropMutex(getpid())) {
 		fprintf(stderr, "Failed to drop mutex\n");
 		return -1;
 	}
+	LOG("Dropped mutex\n");
 
 	while(1) {
 		idleTime = 0;
@@ -160,18 +191,24 @@ int mainRoutine() {
 			LOG("Failed to get ssh connections\n");
 			return -1;
 		}
-		if((idleTime/1000) > idleToSleep || sleepOverride == 1) {
+		if(((idleTime/1000) > idleToSleep && sleepDelay == 0)|| sleepOverride == 1) {
 			if(sshConns == 0 || ignoreSsh != 0 || sleepOverride == 1) {
 				if(sleepOverride == 1) {
 					LOG("Sleeping due to external sleep request\n");
 				}
 				sleepOverride = 0;
+				sleepDelay = 0;
+				LOG("Sleeping\n");
 				goToSleep();
 				continue;
 			}
-			printf("Not sleeping due to SSH session\n");
 		}
-		sleep(10);
+		sleep(SLEEP_INTERVAL);
+		if(sleepDelay < SLEEP_INTERVAL) {
+			sleepDelay = 0;
+		} else {
+			sleepDelay -= SLEEP_INTERVAL;
+		}
 	}
 	return 0;
 }
@@ -179,11 +216,12 @@ int mainRoutine() {
 
 void usage(char* proggy) {
 	fprintf(stdout, "%s -h\tShow usage\n", proggy);
-	fprintf(stdout, "%s -v <log file>\tLog to a file\n", proggy);
+	fprintf(stdout, "%s -l <log file>\tLog to a file\n", proggy);
 	fprintf(stdout, "%s -n\t Ask to sleep right now\n", proggy);
 	fprintf(stdout, "%s -f\tDo not background the process\n", proggy);
 	fprintf(stdout, "%s -t <idle seconds>\tSeconds of idle before sleep\n", proggy);
 	fprintf(stdout, "%s -p <ssh port>\tPort to look for SSH connections on\n", proggy);
+	fprintf(stdout, "%s -d <delay>\tDelay sleep in %d minute intervals\n", proggy, (SLEEP_DELAY_INTERVAL/60));
 	fprintf(stdout, "%s <display>\n", proggy);
 }
 
@@ -312,5 +350,22 @@ void sigHandler(int signum) {
 	if(signum == SIGUSR1) {
 		LOG("Sleep now request made\n");
 		sleepOverride = 1;
+	} else if(signum == SIGUSR2) {
+		sleepDelay += SLEEP_DELAY_INTERVAL;
+		LOG("Delaying sleep due to signal %d\n", sleepDelay);
 	}
+}
+
+int delaySleep(int minutes, pid_t pid) {
+	int mins;
+	for(mins=0; mins < (minutes*60); mins += SLEEP_DELAY_INTERVAL) {
+		if(kill(pid, SIGUSR2) != 0) {
+			fprintf(stderr, "Failed to signal for sleep delay\n");
+			return -1;
+		}
+		//sleep for a bit so the signal can seep in
+		usleep(SIG_SLEEP_INTERVAL);
+	}
+	printf("delayed sleep by %d minutes\n", mins/60);
+	return 0;
 }

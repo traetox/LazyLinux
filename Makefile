@@ -3,8 +3,8 @@ CFLAGS=-Os -g
 LDFLAGS=-lX11 -lXss -lXext
 
 OUTPUT=LazyLinux
-OBJ=main.o ssh.o xstuff.o
-SRC=main.c ssh.c xstuff.c
+OBJ=main.o ssh.o xstuff.o log.o
+SRC=main.c ssh.c xstuff.c log.c
 HDR=ssh.h xstuff.h log.h
 INSTALL_DIR=/usr/bin/
 
@@ -16,6 +16,9 @@ main.o: main.c
 
 ssh.o: ssh.c ssh.h
 	$(CC) ssh.c $(CFLAGS) -c
+
+log.o: log.h log.c
+	$(CC) log.c $(CFLAGS) -c
 
 clean:
 	rm -f $(OBJ) $(OUTPUT)
